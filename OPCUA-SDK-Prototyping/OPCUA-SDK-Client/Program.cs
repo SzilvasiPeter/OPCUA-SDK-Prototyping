@@ -1,27 +1,111 @@
 ﻿using System;
-using System.Threading.Tasks;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Threading;
 
+using Opc.UaFx;
 using Opc.UaFx.Client;
 
 namespace OPCUA_SDK_Client
 {
-    class Program
+    /// <summary>
+    /// 
+    /// </summary>
+    internal class Program
     {
-        static void Main(string[] args)
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="args"></param>
+        internal static void Main(string[] args)
         {
-            string endpoint = "opc.tcp://localhost:5555/Temperature";
-            using (var client = new OpcClient(endpoint))
+            myConsumerControl = new CancellationTokenSource();
+            myDataChanges = new BlockingCollection<OpcValue>();
+
+            Thread consumer = new Thread(ConsumeDataChanges);
+
+            using(OpcClient client = new OpcClient("opc.tcp://localhost:5555/"))
             {
                 client.Connect();
+                consumer.Start(client);
 
-                while (true)
+                Console.WriteLine("Press any key to exit");
+                Console.ReadKey(true);
+
+                myConsumerControl.Cancel();
+                consumer.Join();
+            }
+        }
+
+        #region Private Fields ----------------------------------------------------------------------
+
+        /// <summary>
+        /// 
+        /// </summary>
+        private static CancellationTokenSource myConsumerControl;
+        
+        /// <summary>
+        /// 
+        /// </summary>
+        private static BlockingCollection<OpcValue> myDataChanges;
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="state"></param>
+        private static void ConsumeDataChanges(object state)
+        {
+            OpcClient client = (OpcClient)state;
+            client.SubscribeNodes(CreateCommands(client, "ns=2;s=Data"));
+
+            while (!myConsumerControl.IsCancellationRequested)
+            {
+                try
                 {
-                    var temperature = client.ReadNode("ns=2;s=Temperature");
-                    Console.WriteLine("Temperature output value: {0}", temperature);
+                    OpcValue value = myDataChanges.Take(myConsumerControl.Token);
 
-                    Task.Delay(1000).Wait();
+                    if(value.Value is DateTime timestamp)
+                    {
+                        Console.WriteLine("{0} BULK: Completed (Duration = {1} ms)", DateTime.Now, DateTime.UtcNow.Subtract(timestamp).TotalMilliseconds);
+                    }
+                    else
+                    {
+                        Console.WriteLine("{0} BULK: New Data: {1}", DateTime.Now, value);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
             }
         }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="client"></param>
+        /// <param name="rootNodeId"></param>
+        /// <returns></returns>
+        private static IEnumerable<OpcSubscribeDataChange> CreateCommands(OpcClient client, string rootNodeId)
+        {
+            OpcNodeInfo node = client.BrowseNode(rootNodeId);
+
+            foreach (OpcNodeInfo childNode in node.Children())
+            {
+                yield return new OpcSubscribeDataChange(childNode.NodeId, HandleDataChange);
+            }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
+        private static void HandleDataChange(object sender, OpcDataChangeReceivedEventArgs e)
+        {
+            myDataChanges.Add(e.Item.Value);
+        }
+
+        #endregion Private Fields -------------------------------------------------------------------
     }
 }
